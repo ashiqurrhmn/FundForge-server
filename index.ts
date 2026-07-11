@@ -1,7 +1,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { MongoClient } from 'mongodb';
+import { MongoClient, ObjectId } from 'mongodb';
 
 dotenv.config();
 
@@ -43,6 +43,59 @@ app.get('/api/campaigns/creator/:id', async (req: Request, res: Response) => {
     res.json({ success: true, data: campaigns });
   } catch (error) {
     console.error("Error fetching creator campaigns:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Fetch all campaigns for admin
+app.get('/api/campaigns/admin', async (req: Request, res: Response) => {
+  try {
+    const campaigns = await db.collection("campaigns")
+      .find()
+      .sort({ createdAt: -1 })
+      .toArray();
+      
+    res.json({ success: true, data: campaigns });
+  } catch (error) {
+    console.error("Error fetching admin campaigns:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Update campaign status
+app.patch('/api/campaigns/:id/status', async (req: Request, res: Response) => {
+  try {
+    const campaignId = req.params.id;
+    const { status } = req.body;
+
+    if (!["approved", "rejected", "pending"].includes(status)) {
+      return res.status(400).json({ success: false, message: "Invalid status" });
+    }
+
+    const campaign = await db.collection("campaigns").findOneAndUpdate(
+      { _id: new ObjectId(campaignId) },
+      { $set: { status } },
+      { returnDocument: "after" }
+    );
+
+    if (!campaign) {
+      return res.status(404).json({ success: false, message: "Campaign not found" });
+    }
+
+    if (status === "rejected") {
+      await db.collection("notifications").insertOne({
+        user_email: campaign.creator_email,
+        title: "Campaign Rejected",
+        message: `Your campaign "${campaign.campaign_title}" has been rejected by the admin.`,
+        type: "campaign_rejected",
+        read: false,
+        createdAt: new Date().toISOString()
+      });
+    }
+
+    res.json({ success: true, message: `Campaign status updated to ${status}` });
+  } catch (error) {
+    console.error("Error updating campaign status:", error);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
