@@ -31,6 +31,51 @@ app.post('/api/campaigns', async (req: Request, res: Response) => {
   }
 });
 
+app.get('/api/campaigns/:id', async (req: Request, res: Response) => {
+  try {
+    const campaignId = req.params.id;
+    if (!ObjectId.isValid(campaignId)) {
+      return res.status(400).json({ success: false, message: "Invalid campaign ID" });
+    }
+    const campaign = await db.collection("campaigns").findOne({ _id: new ObjectId(campaignId) });
+    if (!campaign) {
+      return res.status(404).json({ success: false, message: "Campaign not found" });
+    }
+    res.json({ success: true, data: campaign });
+  } catch (error) {
+    console.error("Error fetching campaign:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+app.patch('/api/campaigns/:id', async (req: Request, res: Response) => {
+  try {
+    const campaignId = req.params.id;
+    if (!ObjectId.isValid(campaignId)) {
+      return res.status(400).json({ success: false, message: "Invalid campaign ID" });
+    }
+    
+    const updateData = req.body;
+    // Don't allow changing _id or creator_id
+    delete updateData._id;
+    delete updateData.creator_id;
+
+    const result = await db.collection("campaigns").updateOne(
+      { _id: new ObjectId(campaignId) },
+      { $set: updateData }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ success: false, message: "Campaign not found" });
+    }
+
+    res.json({ success: true, message: "Campaign updated successfully" });
+  } catch (error) {
+    console.error("Error updating campaign:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 app.get('/api/campaigns/creator/:id', async (req: Request, res: Response) => {
   try {
     const creatorId = req.params.id;
