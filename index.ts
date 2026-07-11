@@ -31,6 +31,22 @@ app.post('/api/campaigns', async (req: Request, res: Response) => {
   }
 });
 
+app.get('/api/campaigns/creator/:id', async (req: Request, res: Response) => {
+  try {
+    const creatorId = req.params.id;
+    // Find campaigns and sort by deadline descending (-1)
+    const campaigns = await db.collection("campaigns")
+      .find({ creator_id: creatorId })
+      .sort({ deadline: -1 })
+      .toArray();
+      
+    res.json({ success: true, data: campaigns });
+  } catch (error) {
+    console.error("Error fetching creator campaigns:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 
 
 const client = new MongoClient(process.env.MONGO_URI!);
