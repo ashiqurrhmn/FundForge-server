@@ -76,6 +76,26 @@ app.patch('/api/campaigns/:id', async (req: Request, res: Response) => {
   }
 });
 
+app.delete('/api/campaigns/:id', async (req: Request, res: Response) => {
+  try {
+    const campaignId = req.params.id;
+    if (!ObjectId.isValid(campaignId)) {
+      return res.status(400).json({ success: false, message: "Invalid campaign ID" });
+    }
+    
+    const result = await db.collection("campaigns").deleteOne({ _id: new ObjectId(campaignId) });
+    
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ success: false, message: "Campaign not found" });
+    }
+    
+    res.json({ success: true, message: "Campaign deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting campaign:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 app.get('/api/campaigns/creator/:id', async (req: Request, res: Response) => {
   try {
     const creatorId = req.params.id;
