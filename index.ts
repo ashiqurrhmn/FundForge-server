@@ -15,6 +15,25 @@ app.get('/', (req: Request, res: Response) => {
   res.send('FundForge API is running!');
 });
 
+// Fetch all public/approved campaigns
+app.get('/api/campaigns', async (req: Request, res: Response) => {
+  try {
+    const campaigns = await db.collection("campaigns")
+      // Remove filter if you want to show all for testing, but typically { status: "approved" }
+      // For now, let's fetch all so the UI isn't empty, or just approved if we want strictness.
+      // The user has admin approval process so we should probably stick to approved, or all if we want.
+      // Let's use { status: "approved" }
+      .find({ status: "approved" })
+      .sort({ createdAt: -1 })
+      .toArray();
+      
+    res.json({ success: true, data: campaigns });
+  } catch (error) {
+    console.error("Error fetching campaigns:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 app.post('/api/campaigns', async (req: Request, res: Response) => {
   try {
     const campaignData = req.body;
@@ -27,23 +46,6 @@ app.post('/api/campaigns', async (req: Request, res: Response) => {
     res.status(201).json({ success: true, id: result.insertedId });
   } catch (error) {
     console.error("Error creating campaign:", error);
-    res.status(500).json({ success: false, message: "Internal server error" });
-  }
-});
-
-app.get('/api/campaigns/:id', async (req: Request, res: Response) => {
-  try {
-    const campaignId = req.params.id;
-    if (!ObjectId.isValid(campaignId)) {
-      return res.status(400).json({ success: false, message: "Invalid campaign ID" });
-    }
-    const campaign = await db.collection("campaigns").findOne({ _id: new ObjectId(campaignId) });
-    if (!campaign) {
-      return res.status(404).json({ success: false, message: "Campaign not found" });
-    }
-    res.json({ success: true, data: campaign });
-  } catch (error) {
-    console.error("Error fetching campaign:", error);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
 });
@@ -127,6 +129,46 @@ app.get('/api/campaigns/admin', async (req: Request, res: Response) => {
   }
 });
 
+app.get('/api/campaigns/:id', async (req: Request, res: Response) => {
+  try {
+    const campaignId = req.params.id;
+    if (!ObjectId.isValid(campaignId)) {
+      return res.status(400).json({ success: false, message: "Invalid campaign ID" });
+    }
+    const campaigns = await db.collection("campaigns").aggregate([
+      { $match: { _id: new ObjectId(campaignId) } },
+      {
+        $lookup: {
+          from: "user",
+          localField: "creator_email",
+          foreignField: "email",
+          as: "creator_info"
+        }
+      }
+    ]).toArray();
+
+    if (campaigns.length === 0) {
+      return res.status(404).json({ success: false, message: "Campaign not found" });
+    }
+
+    const campaign = campaigns[0];
+
+    // Attach user details if found
+    if (campaign.creator_info && campaign.creator_info.length > 0) {
+      const user = campaign.creator_info[0];
+      campaign.creator_name = user.name || campaign.creator_name;
+      campaign.creator_image = user.image || null;
+    }
+    
+    // Clean up
+    delete campaign.creator_info;
+    res.json({ success: true, data: campaign });
+  } catch (error) {
+    console.error("Error fetching campaign:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
 // Update campaign status
 app.patch('/api/campaigns/:id/status', async (req: Request, res: Response) => {
   try {
@@ -163,8 +205,68 @@ app.patch('/api/campaigns/:id/status', async (req: Request, res: Response) => {
     console.error("Error updating campaign status:", error);
     res.status(500).json({ success: false, message: "Internal server error" });
   }
+});// --- USER MANAGEMENT ENDPOINTS --- //
+
+// Get all users for admin
+app.get('/api/users/admin', async (req: Request, res: Response) => {
+  try {
+    const users = await db.collection("user").find().sort({ createdAt: -1 }).toArray();
+    res.json({ success: true, data: users });
+  } catch (error) {
+    console.error("Error fetching users:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
 });
 
+// Update user role
+app.patch('/api/users/admin/:id/role', async (req: Request, res: Response) => {
+  try {
+    const userId = req.params.id;
+    const { role } = req.body;
+
+    if (!["admin", "creator", "supporter"].includes(role)) {
+      return res.status(400).json({ success: false, message: "Invalid role" });
+    }
+
+    const user = await db.collection("user").findOneAndUpdate(
+      { _id: userId },
+      { $set: { role, updatedAt: new Date() } },
+      { returnDocument: "after" }
+    );
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    res.json({ success: true, message: `User role updated to ${role}` });
+  } catch (error) {
+    console.error("Error updating user role:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
+
+// Delete user
+app.delete('/api/users/admin/:id', async (req: Request, res: Response) => {
+  try {
+    const userId = req.params.id;
+
+    const user = await db.collection("user").findOne({ _id: userId });
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    await db.collection("user").deleteOne({ _id: userId });
+    
+    // Clean up related auth data
+    await db.collection("session").deleteMany({ userId: userId });
+    await db.collection("account").deleteMany({ userId: userId });
+
+    res.json({ success: true, message: "User deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting user:", error);
+    res.status(500).json({ success: false, message: "Internal server error" });
+  }
+});
 
 
 const client = new MongoClient(process.env.MONGO_URI!);
