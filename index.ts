@@ -655,6 +655,99 @@ app.get('/api/contributions/supporter/:email', async (req: Request, res: Respons
     res.status(500).json({ success: false, message });
   }
 });
+// GET /api/creator/dashboard/:email — Aggregate data for the creator dashboard
+app.get('/api/creator/dashboard/:email', async (req: Request, res: Response) => {
+  try {
+    const { email } = req.params;
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
+    }
+
+    // 1. Fetch campaigns for this creator
+    const campaigns = await db.collection("campaigns").find({ creator_email: email }).toArray();
+    
+    // 2. Fetch approved contributions TO this creator
+    const contributions = await db.collection("contributions").find({ creatorEmail: email, status: "Approved" }).toArray();
+    
+    // Metrics
+    const totalRaised = campaigns.reduce((acc, c) => acc + (c.raisedCredits || 0), 0);
+    const activeCampaigns = campaigns.filter(c => new Date(c.deadline) > new Date()).length;
+    const uniqueBackers = new Set(contributions.map(c => c.supporterEmail));
+    const totalBackers = uniqueBackers.size;
+    const totalViews = totalBackers * 43; // Mocking views based on backers
+
+    // Recent backers (sort by createdAt desc, take 4 unique backers)
+    const seenEmails = new Set();
+    const uniqueRecentContributions = contributions
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime())
+      .filter(c => {
+        if (seenEmails.has(c.supporterEmail)) return false;
+        seenEmails.add(c.supporterEmail);
+        return true;
+      });
+
+    const recentBackers = uniqueRecentContributions
+      .slice(0, 4)
+      .map(c => {
+        const campaign = campaigns.find(camp => camp._id.toString() === c.campaignId);
+        return {
+          id: c._id.toString(),
+          name: c.supporterName || c.supporterEmail.split('@')[0],
+          amount: c.amount,
+          campaign: campaign ? campaign.campaign_title : (c.campaignTitle || "Unknown Campaign"),
+          time: new Date(c.createdAt).toLocaleDateString(),
+          avatar: `https://ui-avatars.com/api/?name=${encodeURIComponent(c.supporterName || c.supporterEmail)}&background=random`
+        };
+      });
+
+    // Chart Data (6 rolling months)
+    const today = new Date();
+    const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const chartData = [];
+    
+    for (let i = 5; i >= 0; i--) {
+      const targetMonth = today.getMonth() - i;
+      const targetYear = today.getFullYear() + Math.floor(targetMonth / 12);
+      const normalizedMonth = ((targetMonth % 12) + 12) % 12;
+      
+      const monthStart = new Date(targetYear, normalizedMonth, 1);
+      const monthEnd = new Date(targetYear, normalizedMonth + 1, 0, 23, 59, 59, 999);
+      
+      const monthContributions = contributions.filter(c => {
+        const d = new Date(c.createdAt);
+        return d >= monthStart && d <= monthEnd;
+      });
+      
+      const sum = monthContributions.reduce((acc, curr) => acc + (curr.amount || 0), 0);
+      
+      chartData.push({
+        month: months[normalizedMonth],
+        impact: sum
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        metrics: {
+          totalRaised,
+          totalBackers,
+          activeCampaigns,
+          totalViews,
+          raisedTrend: "+15%", // Mock trend
+          viewsTrend: "+34%" // Mock trend
+        },
+        recentBackers,
+        chartData
+      }
+    });
+
+  } catch (error) {
+    console.error("Dashboard error:", error);
+    res.status(500).json({ success: false, message: 'Server error fetching creator dashboard' });
+  }
+});
+
 
 // GET /api/supporter/dashboard/:email — Aggregate data for the supporter dashboard
 app.get('/api/supporter/dashboard/:email', async (req: Request, res: Response) => {
@@ -895,6 +988,314 @@ app.patch('/api/contributions/:id/status', async (req: Request, res: Response) =
   }
 });
 
+
+// ═══════════════════════════════════════════════════════════════
+// ══  WITHDRAWAL SYSTEM ROUTES
+// ═══════════════════════════════════════════════════════════════
+
+const CREDITS_PER_USD = 20;
+
+// GET /api/withdrawals/balance/:email — Calculate available, withdrawn, pending credits & USD
+app.get('/api/withdrawals/balance/:email', async (req: Request, res: Response) => {
+  try {
+    const { email } = req.params;
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
+    }
+
+    // Verify user is a creator
+    const user = await db.collection('user').findOne({ email });
+    if (!user || user.role !== 'creator') {
+      return res.status(403).json({ success: false, message: 'Only creators can access withdrawal balance' });
+    }
+
+    // Sum all approved contributions for this creator
+    const approvedContributions = await db.collection('contributions')
+      .find({ creatorEmail: email, status: 'Approved' })
+      .toArray();
+    const totalApprovedCredits = approvedContributions.reduce((acc, c) => acc + (c.amount || 0), 0);
+
+    // Sum approved withdrawals
+    const approvedWithdrawals = await db.collection('withdrawals')
+      .find({ creatorEmail: email, status: 'Approved' })
+      .toArray();
+    const withdrawnCredits = approvedWithdrawals.reduce((acc, w) => acc + (w.withdrawalCredits || 0), 0);
+
+    // Sum pending withdrawals
+    const pendingWithdrawals = await db.collection('withdrawals')
+      .find({ creatorEmail: email, status: 'Pending' })
+      .toArray();
+    const pendingCredits = pendingWithdrawals.reduce((acc, w) => acc + (w.withdrawalCredits || 0), 0);
+
+    const availableCredits = totalApprovedCredits - withdrawnCredits - pendingCredits;
+
+    res.json({
+      success: true,
+      data: {
+        totalApprovedCredits,
+        availableCredits: Math.max(0, availableCredits),
+        withdrawnCredits,
+        pendingCredits,
+        availableUSD: Math.max(0, availableCredits) / CREDITS_PER_USD,
+        withdrawnUSD: withdrawnCredits / CREDITS_PER_USD,
+        pendingUSD: pendingCredits / CREDITS_PER_USD,
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching withdrawal balance:', error);
+    res.status(500).json({ success: false, message: 'Server error fetching balance' });
+  }
+});
+
+// POST /api/withdrawals — Create withdrawal request
+app.post('/api/withdrawals', async (req: Request, res: Response) => {
+  try {
+    const { email, withdrawalCredits, paymentMethod, paymentDetails } = req.body;
+
+    if (!email || !withdrawalCredits || !paymentMethod || !paymentDetails) {
+      return res.status(400).json({ success: false, message: 'All fields are required' });
+    }
+
+    // Verify user is a creator
+    const user = await db.collection('user').findOne({ email });
+    if (!user || user.role !== 'creator') {
+      return res.status(403).json({ success: false, message: 'Only creators can request withdrawals' });
+    }
+
+    const credits = Number(withdrawalCredits);
+    if (isNaN(credits) || credits <= 0) {
+      return res.status(400).json({ success: false, message: 'Invalid withdrawal amount' });
+    }
+
+    // Minimum 200 credits
+    if (credits < 200) {
+      return res.status(400).json({ success: false, message: 'Minimum withdrawal is 200 Credits ($10)' });
+    }
+
+    // Must be multiple of 20
+    if (credits % 20 !== 0) {
+      return res.status(400).json({ success: false, message: 'Withdrawal amount must be a multiple of 20 Credits' });
+    }
+
+    // Payment details must not be empty
+    if (!paymentDetails.trim()) {
+      return res.status(400).json({ success: false, message: 'Payment details are required' });
+    }
+
+    // Check for existing pending withdrawal
+    const existingPending = await db.collection('withdrawals').findOne({
+      creatorEmail: email,
+      status: 'Pending'
+    });
+    if (existingPending) {
+      return res.status(400).json({ success: false, message: 'You already have a pending withdrawal request. Please wait for it to be processed or cancel it.' });
+    }
+
+    // Recalculate available balance server-side
+    const approvedContributions = await db.collection('contributions')
+      .find({ creatorEmail: email, status: 'Approved' })
+      .toArray();
+    const totalApprovedCredits = approvedContributions.reduce((acc, c) => acc + (c.amount || 0), 0);
+
+    const approvedWithdrawals = await db.collection('withdrawals')
+      .find({ creatorEmail: email, status: 'Approved' })
+      .toArray();
+    const withdrawnCredits = approvedWithdrawals.reduce((acc, w) => acc + (w.withdrawalCredits || 0), 0);
+
+    const pendingWithdrawalsSum = await db.collection('withdrawals')
+      .find({ creatorEmail: email, status: 'Pending' })
+      .toArray();
+    const pendingCredits = pendingWithdrawalsSum.reduce((acc, w) => acc + (w.withdrawalCredits || 0), 0);
+
+    const availableCredits = totalApprovedCredits - withdrawnCredits - pendingCredits;
+
+    if (credits > availableCredits) {
+      return res.status(400).json({ success: false, message: `Insufficient balance. You have ${availableCredits} available credits.` });
+    }
+
+    // Create withdrawal document
+    const withdrawalDoc = {
+      creatorId: user._id.toString(),
+      creatorName: user.name || 'Unknown',
+      creatorEmail: email,
+      withdrawalCredits: credits,
+      withdrawalAmountUSD: credits / CREDITS_PER_USD,
+      conversionRate: CREDITS_PER_USD,
+      paymentMethod,
+      paymentDetails: paymentDetails.trim(),
+      status: 'Pending',
+      requestedAt: new Date().toISOString(),
+      approvedAt: null,
+      rejectedAt: null,
+      adminNote: '',
+      transactionReference: '',
+    };
+
+    await db.collection('withdrawals').insertOne(withdrawalDoc);
+
+    // Notify all admins
+    const admins = await db.collection('user').find({ role: 'admin' }).toArray();
+    for (const admin of admins) {
+      await db.collection('notifications').insertOne({
+        user_email: admin.email,
+        title: 'New Withdrawal Request',
+        message: `${user.name || email} has requested a withdrawal of ${credits} Cr ($${(credits / CREDITS_PER_USD).toFixed(2)}) via ${paymentMethod}.`,
+        type: 'withdrawal_request',
+        read: false,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Withdrawal request submitted successfully!',
+      data: withdrawalDoc,
+    });
+  } catch (error) {
+    console.error('Error creating withdrawal:', error);
+    res.status(500).json({ success: false, message: 'Server error creating withdrawal request' });
+  }
+});
+
+// GET /api/withdrawals/creator/:email — Return creator's withdrawal history
+app.get('/api/withdrawals/creator/:email', async (req: Request, res: Response) => {
+  try {
+    const { email } = req.params;
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
+    }
+
+    const withdrawals = await db.collection('withdrawals')
+      .find({ creatorEmail: email })
+      .sort({ requestedAt: -1 })
+      .toArray();
+
+    res.json({ success: true, data: withdrawals });
+  } catch (error) {
+    console.error('Error fetching creator withdrawals:', error);
+    res.status(500).json({ success: false, message: 'Server error fetching withdrawals' });
+  }
+});
+
+// PATCH /api/withdrawals/:id/cancel — Allow creator to cancel pending request
+app.patch('/api/withdrawals/:id/cancel', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { email } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid withdrawal ID' });
+    }
+
+    const withdrawal = await db.collection('withdrawals').findOne({ _id: new ObjectId(id) });
+    if (!withdrawal) {
+      return res.status(404).json({ success: false, message: 'Withdrawal not found' });
+    }
+
+    if (withdrawal.creatorEmail !== email) {
+      return res.status(403).json({ success: false, message: 'You can only cancel your own withdrawals' });
+    }
+
+    if (withdrawal.status !== 'Pending') {
+      return res.status(400).json({ success: false, message: 'Only pending withdrawals can be cancelled' });
+    }
+
+    await db.collection('withdrawals').updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status: 'Cancelled' } }
+    );
+
+    res.json({ success: true, message: 'Withdrawal request cancelled successfully' });
+  } catch (error) {
+    console.error('Error cancelling withdrawal:', error);
+    res.status(500).json({ success: false, message: 'Server error cancelling withdrawal' });
+  }
+});
+
+// GET /api/withdrawals/admin — Return all withdrawal requests for admin
+app.get('/api/withdrawals/admin', async (req: Request, res: Response) => {
+  try {
+    const withdrawals = await db.collection('withdrawals')
+      .find({})
+      .sort({ requestedAt: -1 })
+      .toArray();
+
+    res.json({ success: true, data: withdrawals });
+  } catch (error) {
+    console.error('Error fetching admin withdrawals:', error);
+    res.status(500).json({ success: false, message: 'Server error fetching withdrawals' });
+  }
+});
+
+// PATCH /api/withdrawals/:id/status — Admin approve/reject
+app.patch('/api/withdrawals/:id/status', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { status, adminNote, transactionReference } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid withdrawal ID' });
+    }
+
+    if (!['Approved', 'Rejected'].includes(status)) {
+      return res.status(400).json({ success: false, message: 'Status must be Approved or Rejected' });
+    }
+
+    const withdrawal = await db.collection('withdrawals').findOne({ _id: new ObjectId(id) });
+    if (!withdrawal) {
+      return res.status(404).json({ success: false, message: 'Withdrawal not found' });
+    }
+
+    if (withdrawal.status !== 'Pending') {
+      return res.status(400).json({ success: false, message: 'Only pending withdrawals can be updated' });
+    }
+
+    const updateFields: any = {
+      status,
+      adminNote: adminNote || '',
+    };
+
+    if (status === 'Approved') {
+      updateFields.approvedAt = new Date().toISOString();
+      updateFields.transactionReference = transactionReference || '';
+
+      // Notify creator of approval
+      await db.collection('notifications').insertOne({
+        user_email: withdrawal.creatorEmail,
+        title: 'Withdrawal Approved!',
+        message: `Your withdrawal of ${withdrawal.withdrawalCredits} Cr ($${withdrawal.withdrawalAmountUSD.toFixed(2)}) has been approved.${transactionReference ? ` Transaction Ref: ${transactionReference}` : ''}`,
+        type: 'withdrawal_approved',
+        read: false,
+        createdAt: new Date().toISOString(),
+      });
+    } else if (status === 'Rejected') {
+      updateFields.rejectedAt = new Date().toISOString();
+
+      // Notify creator of rejection
+      await db.collection('notifications').insertOne({
+        user_email: withdrawal.creatorEmail,
+        title: 'Withdrawal Rejected',
+        message: `Your withdrawal of ${withdrawal.withdrawalCredits} Cr ($${withdrawal.withdrawalAmountUSD.toFixed(2)}) has been rejected.${adminNote ? ` Reason: ${adminNote}` : ''}`,
+        type: 'withdrawal_rejected',
+        read: false,
+        createdAt: new Date().toISOString(),
+      });
+    }
+
+    await db.collection('withdrawals').updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateFields }
+    );
+
+    res.json({
+      success: true,
+      message: `Withdrawal ${status.toLowerCase()} successfully`,
+    });
+  } catch (error) {
+    console.error('Error updating withdrawal status:', error);
+    res.status(500).json({ success: false, message: 'Server error updating withdrawal' });
+  }
+});
 
 const client = new MongoClient(process.env.MONGO_URI!);
 export const db = client.db("fundforge");
