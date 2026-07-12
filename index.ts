@@ -1183,11 +1183,11 @@ app.patch('/api/withdrawals/:id/cancel', async (req: Request, res: Response) => 
     const { id } = req.params;
     const { email } = req.body;
 
-    if (!ObjectId.isValid(id)) {
+    if (!ObjectId.isValid(id as string)) {
       return res.status(400).json({ success: false, message: 'Invalid withdrawal ID' });
     }
 
-    const withdrawal = await db.collection('withdrawals').findOne({ _id: new ObjectId(id) });
+    const withdrawal = await db.collection('withdrawals').findOne({ _id: new ObjectId(id as string) });
     if (!withdrawal) {
       return res.status(404).json({ success: false, message: 'Withdrawal not found' });
     }
@@ -1201,7 +1201,7 @@ app.patch('/api/withdrawals/:id/cancel', async (req: Request, res: Response) => 
     }
 
     await db.collection('withdrawals').updateOne(
-      { _id: new ObjectId(id) },
+      { _id: new ObjectId(id as string) },
       { $set: { status: 'Cancelled' } }
     );
 
@@ -1233,7 +1233,7 @@ app.patch('/api/withdrawals/:id/status', async (req: Request, res: Response) => 
     const { id } = req.params;
     const { status, adminNote, transactionReference } = req.body;
 
-    if (!ObjectId.isValid(id)) {
+    if (!ObjectId.isValid(id as string)) {
       return res.status(400).json({ success: false, message: 'Invalid withdrawal ID' });
     }
 
@@ -1241,7 +1241,7 @@ app.patch('/api/withdrawals/:id/status', async (req: Request, res: Response) => 
       return res.status(400).json({ success: false, message: 'Status must be Approved or Rejected' });
     }
 
-    const withdrawal = await db.collection('withdrawals').findOne({ _id: new ObjectId(id) });
+    const withdrawal = await db.collection('withdrawals').findOne({ _id: new ObjectId(id as string) });
     if (!withdrawal) {
       return res.status(404).json({ success: false, message: 'Withdrawal not found' });
     }
@@ -1283,7 +1283,7 @@ app.patch('/api/withdrawals/:id/status', async (req: Request, res: Response) => 
     }
 
     await db.collection('withdrawals').updateOne(
-      { _id: new ObjectId(id) },
+      { _id: new ObjectId(id as string) },
       { $set: updateFields }
     );
 
@@ -1294,6 +1294,139 @@ app.patch('/api/withdrawals/:id/status', async (req: Request, res: Response) => 
   } catch (error) {
     console.error('Error updating withdrawal status:', error);
     res.status(500).json({ success: false, message: 'Server error updating withdrawal' });
+  }
+});
+
+// GET /api/admin/dashboard/stats — Admin dashboard global stats
+app.get('/api/admin/dashboard/stats', async (req: Request, res: Response) => {
+  try {
+    const totalUsers = await db.collection('user').countDocuments();
+    const pendingCampaigns = await db.collection('campaigns').countDocuments({ status: 'pending' });
+    const activeCampaigns = await db.collection('campaigns').countDocuments({ status: 'approved' });
+
+    // Sum all approved contributions globally
+    const approvedContributions = await db.collection('contributions').find({ status: 'Approved' }).toArray();
+    const totalContributions = approvedContributions.reduce((acc, c) => acc + (c.amount || 0), 0);
+    const platformIncomeUSD = totalContributions / 20;
+
+    // Get 5 recent users
+    const recentUsers = await db.collection('user')
+      .find({})
+      .sort({ _id: -1 })
+      .limit(5)
+      .toArray();
+
+    // Get 5 recent campaigns
+    const recentCampaigns = await db.collection('campaigns')
+      .find({})
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .toArray();
+
+    res.json({
+      success: true,
+      data: {
+        totalUsers,
+        pendingCampaigns,
+        activeCampaigns,
+        totalContributions,
+        platformIncomeUSD,
+        recentUsers,
+        recentCampaigns,
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching admin dashboard stats:', error);
+    res.status(500).json({ success: false, message: 'Server error fetching stats' });
+  }
+});
+
+// GET /api/admin/reports — Admin analytics for charts
+app.get('/api/admin/reports', async (req: Request, res: Response) => {
+  try {
+    // 1. Revenue Over Time
+    const approvedContributions = await db.collection('contributions').find({ status: 'Approved' }).toArray();
+    
+    const revenueMap: Record<string, number> = {};
+    approvedContributions.forEach(c => {
+      // Handle different date formats (string vs Date object)
+      const dateStr = c.createdAt ? new Date(c.createdAt).toISOString() : new Date().toISOString();
+      // Format to "MMM YYYY" (e.g. "Jul 2026")
+      const dateObj = new Date(dateStr);
+      const monthYear = dateObj.toLocaleString('default', { month: 'short', year: 'numeric' });
+      
+      revenueMap[monthYear] = (revenueMap[monthYear] || 0) + ((c.amount || 0) / 20); // Platform income in USD
+    });
+
+    // Convert map to array and sort chronologically (rough sort by parsing back)
+    const revenueOverTime = Object.entries(revenueMap)
+      .map(([name, total]) => ({ name, total }))
+      .sort((a, b) => new Date(a.name).getTime() - new Date(b.name).getTime());
+
+    // 2. Campaigns by Category
+    const allCampaigns = await db.collection('campaigns').find({}).toArray();
+    const categoryMap: Record<string, number> = {};
+    allCampaigns.forEach(c => {
+      const cat = c.category || 'Uncategorized';
+      categoryMap[cat] = (categoryMap[cat] || 0) + 1;
+    });
+    const campaignsByCategory = Object.entries(categoryMap)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value); // Sort descending by value
+
+    // 3. Users by Role
+    const allUsers = await db.collection('user').find({}).toArray();
+    const roleMap: Record<string, number> = {};
+    allUsers.forEach(u => {
+      const role = u.role || 'supporter'; // Default if missing
+      const displayRole = role.charAt(0).toUpperCase() + role.slice(1);
+      roleMap[displayRole] = (roleMap[displayRole] || 0) + 1;
+    });
+    const usersByRole = Object.entries(roleMap)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+
+    res.json({
+      success: true,
+      data: {
+        revenueOverTime,
+        campaignsByCategory,
+        usersByRole
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching admin reports:', error);
+    res.status(500).json({ success: false, message: 'Server error fetching reports' });
+  }
+});
+
+// GET /api/admin/contributions — Get all contributions across the platform
+app.get('/api/admin/contributions', async (req: Request, res: Response) => {
+  try {
+    const contributions = await db.collection('contributions')
+      .find({})
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.json({ success: true, data: contributions });
+  } catch (error) {
+    console.error('Error fetching admin contributions:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/admin/purchases — Get all credit purchases across the platform
+app.get('/api/admin/purchases', async (req: Request, res: Response) => {
+  try {
+    const purchases = await db.collection('payments')
+      .find({})
+      .sort({ paymentDate: -1 })
+      .toArray();
+
+    res.json({ success: true, data: purchases });
+  } catch (error) {
+    console.error('Error fetching admin purchases:', error);
+    res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
