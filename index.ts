@@ -615,6 +615,187 @@ app.get('/api/contributions/creator/:email', async (req: Request, res: Response)
   }
 });
 
+// GET /api/contributions/supporter/:email — Fetch all contributions for a supporter
+app.get('/api/contributions/supporter/:email', async (req: Request, res: Response) => {
+  try {
+    const supporterEmail = req.params.email as string;
+
+    if (!supporterEmail) {
+      return res.status(400).json({ success: false, message: 'Supporter email is required' });
+    }
+
+    const contributions = await db
+      .collection('contributions')
+      .find({ supporterEmail })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    // Fetch associated campaign details
+    const campaignIds = [...new Set(contributions.map(c => c.campaignId))];
+    const objectIds = campaignIds.map(id => new ObjectId(id));
+    
+    const campaigns = await db
+      .collection('campaigns')
+      .find({ _id: { $in: objectIds } })
+      .toArray();
+
+    // Attach campaign info to each contribution
+    const enrichedContributions = contributions.map(contribution => {
+      const campaign = campaigns.find(c => c._id.toString() === contribution.campaignId);
+      return {
+        ...contribution,
+        campaign: campaign || null
+      };
+    });
+
+    res.json({ success: true, data: enrichedContributions });
+  } catch (error: unknown) {
+    console.error('Error fetching supporter contributions:', error);
+    const message = error instanceof Error ? error.message : 'Failed to fetch contributions';
+    res.status(500).json({ success: false, message });
+  }
+});
+
+// GET /api/supporter/dashboard/:email — Aggregate data for the supporter dashboard
+app.get('/api/supporter/dashboard/:email', async (req: Request, res: Response) => {
+  try {
+    const email = req.params.email as string;
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: 'Email is required' });
+    }
+
+    // 1. Fetch User (for available credits)
+    const user = await db.collection('user').findOne({ email });
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    const availableCredit = user.credits || 0;
+
+    // 2. Fetch all Approved contributions for this supporter
+    const contributions = await db
+      .collection('contributions')
+      .find({ supporterEmail: email, status: 'Approved' })
+      .toArray();
+
+    // 3. Calculate Metrics
+    let totalImpact = 0;
+    let monthlyContributions = 0;
+    const impactByCategory: Record<string, number> = {};
+    const supportedCampaignIds = new Set<string>();
+
+    const currentMonth = new Date().getMonth();
+    const currentYear = new Date().getFullYear();
+
+    for (const contribution of contributions) {
+      const amount = contribution.amount || 0;
+      totalImpact += amount;
+      
+      const date = new Date(contribution.createdAt);
+      if (date.getMonth() === currentMonth && date.getFullYear() === currentYear) {
+        monthlyContributions += amount;
+      }
+      
+      supportedCampaignIds.add(contribution.campaignId);
+    }
+
+    // 4. Fetch Supported Campaigns
+    const objectIds = Array.from(supportedCampaignIds).map(id => new ObjectId(id));
+    const supportedCampaigns = await db
+      .collection('campaigns')
+      .find({ _id: { $in: objectIds } })
+      .toArray();
+
+    // Calculate Impact by Category (using campaign data)
+    for (const contribution of contributions) {
+      const amount = contribution.amount || 0;
+      const campaign = supportedCampaigns.find(c => c._id.toString() === contribution.campaignId);
+      if (campaign && campaign.category) {
+        impactByCategory[campaign.category] = (impactByCategory[campaign.category] || 0) + amount;
+      }
+    }
+
+    // Convert impactByCategory to an array of objects
+    const impactSummary = Object.entries(impactByCategory).map(([category, amount]) => ({
+      category,
+      amount
+    })).sort((a, b) => b.amount - a.amount);
+
+    // Calculate Averages & Chart Data
+    let avgImpactPerMonth = 0;
+    let avgImpactPerDay = 0;
+    
+    // Generate last 6 months for chart data
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const chartData = [];
+    const now = new Date();
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      chartData.push({
+        name: monthNames[d.getMonth()],
+        month: d.getMonth(),
+        year: d.getFullYear(),
+        amount: 0
+      });
+    }
+
+    if (contributions.length > 0) {
+      // Find earliest contribution date
+      const earliestDate = new Date(
+        Math.min(...contributions.map(c => new Date(c.createdAt).getTime()))
+      );
+      
+      const daysDiff = Math.max(1, Math.ceil((now.getTime() - earliestDate.getTime()) / (1000 * 3600 * 24)));
+      const monthsDiff = Math.max(1, Math.ceil(daysDiff / 30));
+      
+      avgImpactPerMonth = Math.round(totalImpact / monthsDiff);
+      avgImpactPerDay = Math.round(totalImpact / daysDiff);
+
+      // Populate chart data
+      for (const c of contributions) {
+        const cDate = new Date(c.createdAt);
+        const cMonth = cDate.getMonth();
+        const cYear = cDate.getFullYear();
+        
+        const dataPoint = chartData.find(d => d.month === cMonth && d.year === cYear);
+        if (dataPoint) {
+          dataPoint.amount += c.amount || 0;
+        }
+      }
+    }
+
+    // 5. Fetch Trending Campaigns (Top 3 by raisedCredits)
+    const trendingCampaigns = await db
+      .collection('campaigns')
+      .find({ status: 'approved' })
+      .sort({ raisedCredits: -1 })
+      .limit(3)
+      .toArray();
+
+    res.json({
+      success: true,
+      data: {
+        metrics: {
+          totalImpact,
+          monthlyContributions,
+          availableCredit,
+          avgImpactPerMonth,
+          avgImpactPerDay
+        },
+        supportedCampaigns,
+        trendingCampaigns,
+        impactSummary,
+        chartData
+      }
+    });
+
+  } catch (error: unknown) {
+    console.error('Error fetching supporter dashboard data:', error);
+    const message = error instanceof Error ? error.message : 'Failed to fetch dashboard data';
+    res.status(500).json({ success: false, message });
+  }
+});
+
 // PATCH /api/contributions/:id/status — Approve or reject a contribution
 app.patch('/api/contributions/:id/status', async (req: Request, res: Response) => {
   try {
