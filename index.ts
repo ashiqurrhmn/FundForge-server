@@ -1938,8 +1938,8 @@ export const db = client.db("fundforge");
 
 export async function connectToMongoDB() {
   try {
-    await client.connect();
-    await db.command({ ping: 1 });
+    // await client.connect();
+    // await db.command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
     );
@@ -1951,7 +1951,7 @@ export async function connectToMongoDB() {
 
 // Call this only when your application terminates
 export async function disconnectFromMongoDB() {
-  await client.close();
+  // await client.close();
 }
 
 connectToMongoDB()
