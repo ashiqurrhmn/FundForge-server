@@ -1938,8 +1938,8 @@ export const db = client.db("fundforge");
 
 export async function connectToMongoDB() {
   try {
-    // await client.connect();
-    // await db.command({ ping: 1 });
+    await client.connect();
+    await db.command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
     );
@@ -1954,10 +1954,12 @@ export async function disconnectFromMongoDB() {
   // await client.close();
 }
 
-connectToMongoDB()
-  .then(() => {
-    app.listen(port, () => {
-      console.log(`Server is running on port ${port}`);
-    });
-  })
-  .catch(console.dir);
+connectToMongoDB().catch(console.dir);
+
+if (process.env.NODE_ENV !== "production") {
+  app.listen(port, () => {
+    console.log(`Server is running on port ${port}`);
+  });
+}
+
+export default app;
