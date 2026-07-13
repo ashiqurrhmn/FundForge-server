@@ -1,4 +1,4 @@
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { MongoClient, ObjectId } from "mongodb";
@@ -10,7 +10,7 @@ dotenv.config();
 
 //jwt
 const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`))
-const verifyToken = async (req, res, next) => {
+const verifyToken = async (req: any, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
   if(!authHeader || !authHeader.startsWith('Bearer ')) {
     return res.status(401).json({message: 'No token provided'});
@@ -30,21 +30,21 @@ const verifyToken = async (req, res, next) => {
   }
 };
 
-const creatorVerify = async (req, res, next) => {
+const creatorVerify = async (req: any, res: Response, next: NextFunction) => {
   if(req.user.role !== 'creator'){
     return res.status(403).json({message: 'Unauthorized'});
   }
   next();
 };
 
-const adminVerify = async (req, res, next) => {
+const adminVerify = async (req: any, res: Response, next: NextFunction) => {
   if(req.user.role !== 'admin'){
     return res.status(403).json({message: 'Unauthorized'});
   }
   next();
 };
 
-const supporterVerify = async (req, res, next) => {
+const supporterVerify = async (req: any, res: Response, next: NextFunction) => {
   if(req.user.role !== 'supporter'){
     return res.status(403).json({message: 'Unauthorized'});
   }
