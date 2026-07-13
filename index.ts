@@ -7,6 +7,14 @@ import { createRemoteJWKSet, jwtVerify } from "jose-cjs";
 
 dotenv.config();
 
+declare global {
+  namespace Express {
+    interface Request {
+      user?: any;
+    }
+  }
+}
+
 
 //jwt
 const JWKS = createRemoteJWKSet(new URL(`${process.env.CLIENT_URL}/api/auth/jwks`))
@@ -473,6 +481,16 @@ app.post("/api/payments", verifyToken, async (req: Request, res: Response) => {
 
     // Insert payment record
     await db.collection("payments").insertOne(paymentDoc);
+
+    // Insert notification for successful purchase
+    await db.collection("notifications").insertOne({
+      userEmail,
+      title: "Credit Purchase Successful",
+      message: `You successfully purchased ${creditsPurchased} Credits.`,
+      type: "info",
+      read: false,
+      createdAt: new Date().toISOString(),
+    });
 
     // Atomically increment user credits
     await db
@@ -1162,6 +1180,16 @@ app.patch(
         );
 
       if (status === "Approved") {
+        // Notify the supporter
+        await db.collection("notifications").insertOne({
+          userEmail: contribution.supporterEmail,
+          title: "Support Approved",
+          message: `Your support of ${contribution.amount} credits was approved by the creator.`,
+          type: "success",
+          read: false,
+          createdAt: new Date().toISOString(),
+        });
+
         // ── Increase campaign raisedCredits ──
         await db
           .collection("campaigns")
@@ -1836,6 +1864,71 @@ app.get("/api/admin/purchases", verifyToken, adminVerify, async (req: Request, r
     res.json({ success: true, data: purchases });
   } catch (error) {
     console.error("Error fetching admin purchases:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ============================================================
+// Notifications API
+// ============================================================
+
+app.get("/api/notifications", verifyToken, async (req: Request, res: Response) => {
+  try {
+    console.log("req.user in /api/notifications:", JSON.stringify(req.user));
+    const userEmail = req.user?.email || req.user?.user?.email; // Safely get email in case it's nested
+    console.log("Resolved userEmail:", userEmail);
+    const notifications = await db
+      .collection("notifications")
+      .find({ 
+        $or: [
+          { userEmail: userEmail },
+          { user_email: userEmail }
+        ]
+      })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .toArray();
+    res.json({ success: true, data: notifications });
+  } catch (error) {
+    console.error("Error fetching notifications:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+app.patch("/api/notifications/:id/read", verifyToken, async (req: Request, res: Response) => {
+  try {
+    const userEmail = req.user?.email || req.user?.user?.email;
+    const notificationId = req.params.id as string;
+    if (!ObjectId.isValid(notificationId)) {
+      return res.status(400).json({ success: false, message: "Invalid ID" });
+    }
+    await db.collection("notifications").updateOne(
+      { 
+        _id: new ObjectId(notificationId), 
+        $or: [{ userEmail: userEmail }, { user_email: userEmail }]
+      },
+      { $set: { read: true } }
+    );
+    res.json({ success: true, message: "Marked as read" });
+  } catch (error) {
+    console.error("Error marking notification read:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+app.patch("/api/notifications/read-all", verifyToken, async (req: Request, res: Response) => {
+  try {
+    const userEmail = req.user?.email || req.user?.user?.email;
+    await db.collection("notifications").updateMany(
+      { 
+        $or: [{ userEmail: userEmail }, { user_email: userEmail }],
+        read: false 
+      },
+      { $set: { read: true } }
+    );
+    res.json({ success: true, message: "All marked as read" });
+  } catch (error) {
+    console.error("Error marking all read:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
